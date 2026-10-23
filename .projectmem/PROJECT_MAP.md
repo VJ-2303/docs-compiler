@@ -2,6 +2,9 @@
 
 Status: auto-detected from project manifests (an AI session may refine this).
 
+## Project purpose
+A clean, production-grade event-driven microservices system in Go on Arch Linux:
+
 ## Stack
 - Tags: go
 - Detected from: go.mod
