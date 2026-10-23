@@ -5,11 +5,10 @@ Welcome. In this guide, we are going to build a production-grade, event-driven m
 Rather than building an overwhelming, multi-tiered monolith or a complex image-processing cluster, we will build a practical, digestible **Markdown Document Publishing Pipeline**. This project gives you hands-on experience with every core microservice pattern without unnecessary complexity:
 
 1. **Synchronous REST API** (`net/http`) for accepting user document submissions and checking status.
-2. **Synchronous gRPC** (`google.golang.org/grpc`) for high-performance, type-safe inter-service calls.
-3. **Asynchronous Message Queue** (`RabbitMQ`) for offloading document compilation to the background.
-4. **Relational Data Boundary** (`PostgreSQL`) for metadata, ownership, and state machines.
-5. **Object Storage** (`MinIO / S3`) for storing rendered HTML documents.
-6. **Container & Kubernetes Infrastructure** (`Docker Compose` to `k3d` / `k3s`).
+2. **Asynchronous Event Choreography** (`RabbitMQ`) for offloading compilation and reporting status back.
+3. **Relational Data Boundary** (`PostgreSQL`) for document metadata, ownership, and state machines.
+4. **Object Storage** (`MinIO / S3`) for storing rendered HTML documents.
+5. **Container & Kubernetes Infrastructure** (`Docker Compose` to `k3d` / `k3s`).
 
 Throughout this entire guide, we write pure, standard-library-first Go. Zero bloated frameworks (no Gin, no Fiber), zero magic ORMs (no GORM). Everything is explicit, testable, and production-ready.
 
@@ -42,7 +41,7 @@ Here is how data flows through our system:
                                 v
                +---------------------------------+
                |          API Service            |
-               |       (cmd/api, :8080)          |
+               |        (cmd/api, :8080)         |
                +-------+-----------------+-------+
                        |                 |
      Store Metadata    |                 | Publish "doc.submitted"
@@ -51,29 +50,24 @@ Here is how data flows through our system:
             |    PostgreSQL    |   |     RabbitMQ     |
             | (Documents Store)|   |  Exchange: docs  |
             +------------------+   +--------+---------+
-                                            |
-                              Consume Queue | "doc.compile"
-                                            v
-                               +------------------------+
-                               |    Compiler Service    |
-                               | (cmd/compiler, :50051) |
+                       ^                    |
+                       |                    | Consume "doc.submitted"
+        Update Status  |                    v
+       (via API worker)|       +------------------------+
+       consumes event  |       |    Compiler Service    |
+       "doc.compiled"  +-------+      (cmd/compiler)    |
                                +-----------+------------+
                                            |
-                               1. Parse Markdown & syntax
+                               1. Parse Markdown (goldmark)
                                2. Render styled HTML
-                               3. Upload to MinIO (S3)
-                               4. Update status / ACK
+                               3. Upload to MinIO (Bucket: docs-rendered)
+                               4. Publish "doc.compiled" / ACK
                                            |
                                            v
                                +------------------------+
                                |     MinIO (S3 API)     |
-                               |      Bucket: docs      |
+                               |  Bucket: docs-rendered |
                                +------------------------+
-                                           ^
-                                           |
-       gRPC Internal Query                 |
-       (Fetch render stats & artifact URL) |
-       API Service ------------------------+
 ```
 
 ### Why Decouple with RabbitMQ?
@@ -86,21 +80,17 @@ By using **RabbitMQ**:
 2. The **Compiler Service** pulls jobs from RabbitMQ at its own controlled pace (using a concurrency limit called `prefetch_count`).
 3. If the Compiler crashes, RabbitMQ detects the severed connection and safely redelivers the message to another worker.
 
-### Why gRPC for Inter-Service Communication?
-Why not use HTTP REST between the API Service and Compiler Service?
-- **Strict Contracts**: gRPC uses Protocol Buffers (`.proto`). Both services share the exact same generated Go structs. You get compile-time type safety; if a field type changes, the code fails to compile instead of failing silently at runtime.
-- **Speed & Payload Size**: Protocol Buffers serialize into compact binary data over HTTP/2, significantly faster than encoding and decoding JSON strings.
-
-### The Database Boundary Rule
+### The Database Boundary Rule & Event Feedback
 Notice that **only the API Service connects to PostgreSQL**. The Compiler Service has no database credentials.
 - If multiple services read and write to the same database, you don't have microservices — you have a **distributed monolith**. Any change to a table schema requires deploying both services at the exact same instant.
-- In our system, the Compiler gets what it needs in the RabbitMQ event (`document_id`, `markdown_content`), uploads the rendered output to MinIO, and communicates status back via events or gRPC.
+- In our system, the Compiler gets what it needs in the RabbitMQ event (`document_id`, `source_content`), uploads the rendered output to MinIO, and publishes a `doc.compiled` event back to RabbitMQ.
+- The API Service listens to `doc.compiled` and updates its own database row to `COMPLETED` with the S3 key and render duration. Clean, decoupled event choreography!
 
 ---
 
 ## 3. Step-by-Step Implementation: Project Layout
 
-Let's establish our clean monorepo folder structure. A monorepo keeps our shared Protobuf definitions and Docker configurations in one repository while maintaining strictly isolated Go binaries.
+Let's establish our clean monorepo folder structure. A monorepo keeps our Docker configurations and service binaries in one repository while maintaining strictly isolated Go packages.
 
 Here is the directory structure we are creating:
 
@@ -109,25 +99,16 @@ new-ms/
 ├── cmd/
 │   ├── api/                  # Main entrypoint for the public HTTP API
 │   │   └── main.go
-│   └── compiler/             # Main entrypoint for the background worker & gRPC server
+│   └── compiler/             # Main entrypoint for the background worker
 │       └── main.go
 │
 ├── internal/                 # Internal Go packages (not importable by external projects)
+│   ├── api/                  # HTTP routes, handlers, and middleware
 │   ├── broker/               # RabbitMQ publisher and consumer logic
 │   ├── compiler/             # Goldmark Markdown-to-HTML rendering engine
 │   ├── database/             # PostgreSQL connection pooling (pgxpool)
 │   ├── store/                # SQL queries for documents metadata
 │   └── storage/              # MinIO S3 client for saving HTML artifacts
-│
-├── pkg/                      # Public/generated Go packages
-│   └── proto/                # Compiled Protobuf and gRPC stubs
-│       └── compiler/
-│           └── v1/
-│
-├── proto/                    # Source Protocol Buffer schemas
-│   └── compiler/
-│       └── v1/
-│           └── compiler.proto
 │
 ├── migrations/               # SQL migration files
 │   └── 000001_create_documents_table.up.sql
@@ -204,17 +185,16 @@ go 1.27
 ```
 
 ### Check 2: Verify Installed Host Tools
-Run this one-liner to confirm your Arch Linux environment has the required container and compilation tools:
+Run this one-liner to confirm your Arch Linux environment has the required container and orchestration tools:
 
 ```bash
-docker --version && k3d --version && kubectl version --client && protoc --version
+docker --version && k3d --version && kubectl version --client
 ```
 
 **Expected output:**
 - Docker version `29.x`
 - k3d version `v5.8.x`
 - Client Version `v1.37.x`
-- libprotoc `36.x`
 
 ---
 
@@ -241,12 +221,12 @@ docker --version && k3d --version && kubectl version --client && protoc --versio
 
 ### Key Takeaways
 - We chose a clean **2-service architecture**: API Service (`cmd/api`) and Compiler Service (`cmd/compiler`).
-- **Sync for user interaction** (HTTP REST), **Async for heavy work** (RabbitMQ), **Contract-first RPC for inter-service queries** (gRPC).
-- **Postgres belongs exclusively to the API Service**; the Compiler Service outputs rendered HTML documents into **MinIO S3**.
+- **Sync for user interaction** (HTTP REST) and **Async for heavy work & state updates** (RabbitMQ event choreography).
+- **Postgres belongs exclusively to the API Service**; the Compiler Service outputs rendered HTML documents into **MinIO S3** and notifies the API via events.
 
 ### Self-Check Questions Before Advancing
 1. Why does the Compiler Service **not** need a direct connection to PostgreSQL?
-2. What are the two main advantages of using gRPC over HTTP/JSON for inter-service communication?
+2. How does the API Service find out that a document finished compiling if the Compiler cannot touch PostgreSQL?
 3. What is the role of `prefetch_count` in RabbitMQ when processing heavy tasks?
 
 ---

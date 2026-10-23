@@ -13,7 +13,7 @@ Instead, we follow the approach taught by Alex Edwards: encapsulating all databa
 ## 1. Objectives & Overview
 
 In this chapter, you will:
-- Learn why encapsulating SQL in a dedicated store layer isolates database driver dependencies from your transport layer (HTTP/gRPC).
+- Learn why encapsulating SQL in a dedicated store layer isolates database driver dependencies from your transport and handler layers.
 - Define clean Go domain models with custom status types and sentinel errors (`ErrRecordNotFound`).
 - Implement parameterized SQL queries for inserting, querying, and updating document records.
 - Learn how `context.Context` cancellation propagates to PostgreSQL to terminate abandoned server-side queries.
@@ -458,7 +458,7 @@ docker exec -it docpub-postgres psql -U docpub -d docpub -c "SELECT id, title, s
 ## 7. Summary & Next Steps
 
 ### Key Takeaways
-- The data-access layer cleanly decouples HTTP and gRPC handlers from database drivers and raw SQL queries.
+- The data-access layer cleanly decouples HTTP handlers from database drivers and raw SQL queries.
 - Sentinel errors (`ErrRecordNotFound`) let outer layers respond with proper HTTP status codes (`404 Not Found`) without referencing `pgx.ErrNoRows`.
 - Parameterized placeholders (`$1`, `$2`) eliminate SQL injection vulnerabilities by separating query structure from user input.
 - `context.Context` cancellation ensures abandoned client requests do not leave runaway queries running inside PostgreSQL.
@@ -472,4 +472,4 @@ docker exec -it docpub-postgres psql -U docpub -d docpub -c "SELECT id, title, s
 
 This completes **Phase 1: Architecture & Foundation**.
 
-In **[Chapter 5: Defining the gRPC Contract](05-defining-the-grpc-contract.md)**, we enter **Phase 2: Contract-First Inter-Service RPC**. We will write our Protocol Buffers schema (`compiler.proto`), compile it into Go stubs using `protoc`, and define the RPC boundary for our Compiler Service.
+In **[Chapter 5: The API Server and Handlers](05-the-api-server-and-handlers.md)**, we enter **Phase 2: The API Service (HTTP & Event Ingestion)**. We will set up our `net/http` server, custom middleware (structured logging with `slog`, panic recovery), JSON request/response helpers, input validation, and implement handlers for `POST /v1/documents` and `GET /v1/documents/{id}`.
