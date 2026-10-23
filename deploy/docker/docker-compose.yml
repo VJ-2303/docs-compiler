@@ -19,22 +19,20 @@ services:
       timeout: 5s
       retries: 5
 
-  rabbitmq:
-    image: rabbitmq:3.13-management-alpine
-    container_name: docpub-rabbitmq
+  nats:
+    image: nats:2.10-alpine
+    container_name: docpub-nats
     restart: unless-stopped
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "4222:4222"
+      - "8222:8222"
     volumes:
-      - rabbitmqdata:/var/lib/rabbitmq
+      - natsdata:/data
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
       retries: 5
 
   minio:
@@ -59,7 +57,7 @@ services:
 volumes:
   pgdata:
     name: docpub-pgdata
-  rabbitmqdata:
-    name: docpub-rabbitmqdata
+  natsdata:
+    name: docpub-natsdata
   miniodata:
     name: docpub-miniodata

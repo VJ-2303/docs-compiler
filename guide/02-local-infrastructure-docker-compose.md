@@ -2,7 +2,7 @@
 
 Welcome to Chapter 2. In this chapter, we step away from Go code for a moment to build the bedrock of our local development environment.
 
-A distributed system cannot function without its backing services. Rather than installing PostgreSQL, RabbitMQ, and MinIO directly on your Arch Linux host—polluting your system with background daemons, conflicting ports, and lingering state—we will define our entire backing infrastructure as code using **Docker Compose**.
+A distributed system cannot function without its backing services. Rather than installing PostgreSQL, NATS JetStream, and MinIO directly on your Arch Linux host—polluting your system with background daemons, conflicting ports, and lingering state—we will define our entire backing infrastructure as code using **Docker Compose**.
 
 By the end of this chapter, you will be able to spin up, inspect, and tear down our complete infrastructure cluster with single, reproducible commands.
 
@@ -12,8 +12,8 @@ By the end of this chapter, you will be able to spin up, inspect, and tear down 
 
 In this chapter, you will:
 - Understand container networking and bridge networks.
-- Learn why persistent named volumes are mandatory for databases and object storage.
-- Configure PostgreSQL 16, RabbitMQ 3.13, and MinIO with isolated ports and credentials.
+- Learn why persistent named volumes are mandatory for databases, message streams, and object storage.
+- Configure PostgreSQL 16, NATS 2.10 (with JetStream enabled), and MinIO with isolated ports and credentials.
 - Implement container healthchecks so services only accept traffic when fully initialized.
 - Write a clean `Makefile` to automate infrastructure lifecycle commands on Arch Linux.
 - Verify connectivity to all three services using CLI tools and web consoles.
@@ -31,21 +31,21 @@ Docker Compose automatically creates a user-defined **bridge network** for our p
 +-----------------------------------------------------------------+
 | Docker Bridge Network ("docpub-net")                            |
 |                                                                 |
-|  +------------------+  +------------------+  +----------------+ |
-|  |    PostgreSQL    |  |     RabbitMQ     |  |     MinIO      | |
-|  |  (dns: postgres) |  |  (dns: rabbitmq) |  |  (dns: minio)  | |
-|  |    port: 5432    |  |    port: 5672    |  |   port: 9000   | |
-|  +--------+---------+  +--------+---------+  +-------+--------+ |
-|           |                     |                    |          |
-+-----------|---------------------|--------------------|----------+
-            |                     |                    |
-       Host Bind             Host Bind            Host Binds
-       127.0.0.1:5432        127.0.0.1:5672       127.0.0.1:9000 (API)
-                             127.0.0.1:15672 (UI) 127.0.0.1:9001 (Console)
+|  +------------------+  +--------------------+  +--------------+ |
+|  |    PostgreSQL    |  |   NATS JetStream   |  |    MinIO     | |
+|  |  (dns: postgres) |  |    (dns: nats)     |  | (dns: minio) | |
+|  |    port: 5432    |  |     port: 4222     |  |  port: 9000  | |
+|  +--------+---------+  +---------+----------+  +-------+------+ |
+|           |                      |                     |        |
++-----------|----------------------|---------------------|--------+
+            |                      |                     |
+       Host Bind              Host Binds            Host Binds
+       127.0.0.1:5432         127.0.0.1:4222 (Client) 127.0.0.1:9000 (API)
+                              127.0.0.1:8222 (Monitor) 127.0.0.1:9001 (Console)
 ```
 
 Inside this network, Docker runs an embedded DNS server. This means:
-- The API service will connect to PostgreSQL using the hostname `postgres:5432` (inside Docker) or `localhost:5432` (when running locally on your Arch host).
+- The API service will connect to PostgreSQL using hostname `postgres:5432` (inside Docker) or `localhost:5432` (when running locally on your Arch host).
 - Services do not need hardcoded container IP addresses.
 
 ### Why Persistent Named Volumes?
@@ -54,15 +54,15 @@ Containers are ephemeral by default: when a container stops and is deleted, any 
 To preserve database records, uploaded files, and queued messages across restarts, we attach **named volumes**:
 - `pgdata` -> mounted to `/var/lib/postgresql/data`
 - `miniodata` -> mounted to `/data`
-- `rabbitmqdata` -> mounted to `/var/lib/rabbitmq`
+- `natsdata` -> mounted to `/data`
 
 Named volumes are managed by Docker on Arch Linux under `/var/lib/docker/volumes/`. They persist even when containers are destroyed via `docker compose down`.
 
 ### Why Native Healthchecks Matter
 Starting a container is not instantaneous:
-1. Docker starts the PostgreSQL container process.
-2. PostgreSQL initializes shared memory, reads configuration files, and runs recovery checks.
-3. Only after 2–5 seconds does PostgreSQL begin accepting TCP connections.
+1. Docker starts the container process.
+2. The service initializes shared memory, reads configuration files, and runs recovery checks.
+3. Only after several seconds does it begin accepting TCP connections.
 
 If an application attempts to connect immediately after container launch, it crashes with `connection refused`. We configure native `healthcheck` commands in Docker Compose so dependent services know the precise moment a service is ready for traffic.
 
@@ -106,34 +106,36 @@ services:
 
 ---
 
-### Step 3.2: RabbitMQ Service Definition
-Next, we add RabbitMQ using the management alpine variant, which includes the browser-based administrative dashboard.
+### Step 3.2: NATS JetStream Service Definition
+Next, we add NATS with JetStream enabled for fast, lightweight event streaming.
 
 ```yaml
-  rabbitmq:
-    image: rabbitmq:3.13-management-alpine
-    container_name: docpub-rabbitmq
+  nats:
+    image: nats:2.10-alpine
+    container_name: docpub-nats
     restart: unless-stopped
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     ports:
-      - "5672:5672"    # AMQP protocol port for client apps
-      - "15672:15672"  # Management UI web console
+      - "4222:4222"  # Client connection port
+      - "8222:8222"  # HTTP monitoring & health port
     volumes:
-      - rabbitmqdata:/var/lib/rabbitmq
+      - natsdata:/data
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
       retries: 5
 ```
 
 **Line-by-line explanation:**
-- `image: rabbitmq:3.13-management-alpine`: Bundles RabbitMQ server with the HTTP management plugin.
-- `ports: "5672:5672"`: The binary AMQP 0-9-1 port that our Go services use to publish and consume messages.
-- `ports: "15672:15672"`: The web dashboard port accessible in your browser at `http://localhost:15672`.
-- `healthcheck`: Executes `rabbitmq-diagnostics -q ping`. The `-q` flag silences verbose diagnostic output, returning exit code 0 when healthy.
+- `image: nats:2.10-alpine`: Lightweight, single Go binary container image (<20MB total footprint).
+- `command: ["-js", "-sd", "/data", "-m", "8222"]`:
+  - `-js`: Enables JetStream persistence engine.
+  - `-sd /data`: Sets the storage directory for persistent message streams to `/data`.
+  - `-m 8222`: Enables HTTP monitoring and metrics on port 8222.
+- `ports: "4222:4222"`: Standard NATS client protocol port.
+- `ports: "8222:8222"`: HTTP monitoring port returning JSON statistics and health checks.
+- `healthcheck`: Uses Alpine's built-in `wget --spider` to ping `http://localhost:8222/healthz`.
 
 ---
 
@@ -142,7 +144,7 @@ Now we configure MinIO, our high-performance S3-compatible object store.
 
 ```yaml
   minio:
-    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    image: cgr.dev/chainguard/minio:latest
     container_name: docpub-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -169,7 +171,7 @@ Now we configure MinIO, our high-performance S3-compatible object store.
 ---
 
 ### Step 3.4: Complete Compose File & Volumes
-Here is the assembled file to be saved at `deploy/docker/docker-compose.yml`:
+Here is the assembled file saved at `deploy/docker/docker-compose.yml`:
 
 ```yaml
 version: "3.8"
@@ -193,26 +195,24 @@ services:
       timeout: 5s
       retries: 5
 
-  rabbitmq:
-    image: rabbitmq:3.13-management-alpine
-    container_name: docpub-rabbitmq
+  nats:
+    image: nats:2.10-alpine
+    container_name: docpub-nats
     restart: unless-stopped
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "4222:4222"
+      - "8222:8222"
     volumes:
-      - rabbitmqdata:/var/lib/rabbitmq
+      - natsdata:/data
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
       retries: 5
 
   minio:
-    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    image: cgr.dev/chainguard/minio:latest
     container_name: docpub-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -233,8 +233,8 @@ services:
 volumes:
   pgdata:
     name: docpub-pgdata
-  rabbitmqdata:
-    name: docpub-rabbitmqdata
+  natsdata:
+    name: docpub-natsdata
   miniodata:
     name: docpub-miniodata
 ```
@@ -291,7 +291,7 @@ sudo systemctl enable --now docker
 ```
 
 ### Step 4.2: Start the Infrastructure
-From the repository root `/home/vj/Code/new-ms`, run:
+From the repository root, run:
 
 ```bash
 make up
@@ -306,11 +306,11 @@ make up
 ```
 [+] Running 6/6
  ✔ Volume "docpub-miniodata"      Created
- ✔ Volume "docpub-rabbitmqdata"   Created
+ ✔ Volume "docpub-natsdata"       Created
  ✔ Volume "docpub-pgdata"         Created
  ✔ Container docpub-minio         Started
  ✔ Container docpub-postgres      Started
- ✔ Container docpub-rabbitmq      Started
+ ✔ Container docpub-nats          Started
 ```
 
 ---
@@ -329,10 +329,12 @@ make ps
 **Expected terminal output (notice the `(healthy)` indicator):**
 ```
 NAME              IMAGE                              STATUS                   PORTS
-docpub-minio      minio/minio:RELEASE...             Up 15s (healthy)         0.0.0.0:9000->9000/tcp, 0.0.0.0:9001->9001/tcp
+docpub-minio      cgr.dev/chainguard/minio:latest    Up 15s (healthy)         0.0.0.0:9000->9000/tcp, 0.0.0.0:9001->9001/tcp
 docpub-postgres   postgres:16-alpine                 Up 15s (healthy)         0.0.0.0:5432->5432/tcp
-docpub-rabbitmq   rabbitmq:3.13-management-alpine   Up 15s (healthy)         0.0.0.0:5672->5672/tcp, 0.0.0.0:15672->15672/tcp
+docpub-nats       nats:2.10-alpine                   Up 15s (healthy)         0.0.0.0:4222->4222/tcp, 0.0.0.0:8222->8222/tcp
 ```
+
+---
 
 ### Check 2: Verify PostgreSQL Connectivity
 Query PostgreSQL directly using `docker exec`:
@@ -349,6 +351,8 @@ docker exec -it docpub-postgres psql -U docpub -d docpub -c "SELECT version();"
 (1 row)
 ```
 
+---
+
 ### Check 3: Verify MinIO Console Access
 Open your browser or run curl against the MinIO health endpoint:
 
@@ -364,20 +368,34 @@ Server: MinIO
 ```
 You can also open **http://localhost:9001** in your browser and log in with username `minioadmin` and password `minioadmin`.
 
-### Check 4: Verify RabbitMQ Management API
-Test RabbitMQ's HTTP API:
+---
+
+### Check 4: Verify NATS JetStream Health & Monitoring
+Test the NATS HTTP monitoring API:
 
 ```bash
-curl -i -u guest:guest http://localhost:15672/api/overview
+curl -i http://localhost:8222/healthz
 ```
 
 **Expected output:**
 ```http
 HTTP/1.1 200 OK
 Content-Type: application/json
-...
+Date: Fri, 23 Oct 2026 17:00:00 GMT
+Content-Length: 17
+
+{"status":"ok"}
 ```
-You can also open **http://localhost:15672** in your browser and log in with username `guest` and password `guest`.
+
+Query the JetStream statistics endpoint:
+```bash
+curl -s http://localhost:8222/jsz | grep -o '"jetstream":[^,]*'
+```
+
+**Expected output:**
+```json
+"jetstream":true
+```
 
 ---
 
@@ -385,12 +403,12 @@ You can also open **http://localhost:15672** in your browser and log in with use
 
 1. **Port Already in Use (`bind: address already in use`):**
    - *Symptom*: Error response from daemon: `driver failed programming external connectivity on endpoint docpub-postgres: bind: address already in use`.
-   - *Cause*: A local PostgreSQL or RabbitMQ daemon is already running on your Arch host.
+   - *Cause*: A local PostgreSQL or NATS daemon is already running on your Arch host.
    - *Fix*: Check which process owns the port using Arch Linux `ss`:
      ```bash
-     sudo ss -tulpn | grep -E ':(5432|5672|9000)'
+     sudo ss -tulpn | grep -E ':(5432|4222|8222|9000)'
      ```
-     Stop host service:
+     Stop conflicting host service:
      ```bash
      sudo systemctl stop postgresql
      ```
@@ -405,7 +423,7 @@ You can also open **http://localhost:15672** in your browser and log in with use
      ```
 
 3. **Resetting Corrupt State:**
-   - *Symptom*: RabbitMQ or PostgreSQL fails to boot due to dirty volume state.
+   - *Symptom*: NATS or PostgreSQL fails to boot due to dirty volume state.
    - *Fix*: Run `make clean` to delete all containers and volumes, then `make up` to start fresh.
 
 ---
@@ -414,6 +432,7 @@ You can also open **http://localhost:15672** in your browser and log in with use
 
 ### Key Takeaways
 - Backing services run cleanly isolated in Docker without polluting your Arch Linux environment.
+- NATS JetStream runs as a fast, single Go binary requiring ~20MB RAM and zero external runtimes.
 - Persistent named volumes preserve data across container restarts.
 - Healthchecks provide deterministic feedback on whether services are ready to accept connections.
 - The `Makefile` simplifies operational commands down to `make up`, `make down`, and `make ps`.
@@ -421,7 +440,7 @@ You can also open **http://localhost:15672** in your browser and log in with use
 ### Self-Check Questions Before Advancing
 1. What is the difference between connecting to PostgreSQL on `localhost:5432` vs `postgres:5432`?
 2. Why should we use `docker compose down` instead of `docker compose down -v` during normal development?
-3. What is the purpose of the `pg_isready` command in the healthcheck definition?
+3. What is the purpose of the `-js` flag in the NATS container command?
 
 ---
 

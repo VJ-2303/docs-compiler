@@ -175,7 +175,7 @@ Instead, we follow standard REST conventions for background processing:
 1. Validate the Markdown syntax and payload size.
 2. Insert a record with status `PENDING` into PostgreSQL.
 3. Immediately respond with **`202 Accepted`** containing the document UUID and metadata in ~15ms.
-4. (In Chapter 6, we will publish a `doc.submitted` event to RabbitMQ to trigger background processing).
+4. (In Chapter 6, we will publish a `docs.submitted` event to NATS JetStream to trigger background processing).
 
 Clients can then poll `GET /v1/documents/{id}` to inspect status updates.
 
@@ -1056,4 +1056,4 @@ Switch back to your server terminal. Notice the clean, machine-readable JSON log
 
 ---
 
-In **[Chapter 6: Publishing Events to RabbitMQ](06-publishing-events-to-rabbitmq.md)**, we will connect the API Service to RabbitMQ. After inserting the document into PostgreSQL, the API Service will publish a persistent `doc.submitted` event to the `docs` exchange, initiating the asynchronous publishing workflow.
+In **[Chapter 6: Publishing Events to NATS JetStream](06-publishing-events-to-nats-jetstream.md)**, we will connect the API Service to NATS JetStream. After inserting the document into PostgreSQL, the API Service will publish a persistent `docs.submitted` event to the `DOCS` stream, initiating the asynchronous publishing workflow.

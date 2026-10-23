@@ -5,7 +5,7 @@ Welcome. In this guide, we are going to build a production-grade, event-driven m
 Rather than building an overwhelming, multi-tiered monolith or a complex image-processing cluster, we will build a practical, digestible **Markdown Document Publishing Pipeline**. This project gives you hands-on experience with every core microservice pattern without unnecessary complexity:
 
 1. **Synchronous REST API** (`net/http`) for accepting user document submissions and checking status.
-2. **Asynchronous Event Choreography** (`RabbitMQ`) for offloading compilation and reporting status back.
+2. **Asynchronous Event Choreography** (`NATS JetStream`) for offloading compilation and reporting status back.
 3. **Relational Data Boundary** (`PostgreSQL`) for document metadata, ownership, and state machines.
 4. **Object Storage** (`MinIO / S3`) for storing rendered HTML documents.
 5. **Container & Kubernetes Infrastructure** (`Docker Compose` to `k3d` / `k3s`).
@@ -44,47 +44,47 @@ Here is how data flows through our system:
                |        (cmd/api, :8080)         |
                +-------+-----------------+-------+
                        |                 |
-     Store Metadata    |                 | Publish "doc.submitted"
+     Store Metadata    |                 | Publish "docs.submitted"
      (PostgreSQL)      v                 v
-            +------------------+   +------------------+
-            |    PostgreSQL    |   |     RabbitMQ     |
-            | (Documents Store)|   |  Exchange: docs  |
-            +------------------+   +--------+---------+
-                       ^                    |
-                       |                    | Consume "doc.submitted"
-        Update Status  |                    v
-       (via API worker)|       +------------------------+
-       consumes event  |       |    Compiler Service    |
-       "doc.compiled"  +-------+      (cmd/compiler)    |
-                               +-----------+------------+
-                                           |
-                               1. Parse Markdown (goldmark)
-                               2. Render styled HTML
-                               3. Upload to MinIO (Bucket: docs-rendered)
-                               4. Publish "doc.compiled" / ACK
-                                           |
-                                           v
-                               +------------------------+
-                               |     MinIO (S3 API)     |
-                               |  Bucket: docs-rendered |
-                               +------------------------+
+            +------------------+   +----------------------+
+            |    PostgreSQL    |   |    NATS JetStream    |
+            | (Documents Store)|   |     Stream: DOCS     |
+            +------------------+   +----------+-----------+
+                       ^                      |
+                       |                      | Consume "docs.submitted"
+        Update Status  |                      v
+       (via API worker)|         +------------------------+
+       consumes event  |         |    Compiler Service    |
+       "docs.compiled" +---------+      (cmd/compiler)    |
+                                 +-----------+------------+
+                                             |
+                                 1. Parse Markdown (goldmark)
+                                 2. Render styled HTML
+                                 3. Upload to MinIO (Bucket: docs-rendered)
+                                 4. Publish "docs.compiled" / ACK
+                                             |
+                                             v
+                                 +------------------------+
+                                 |     MinIO (S3 API)     |
+                                 |  Bucket: docs-rendered |
+                                 +------------------------+
 ```
 
-### Why Decouple with RabbitMQ?
+### Why Decouple with NATS JetStream?
 Imagine a naive system where a user uploads a 10,000-line Markdown document containing tables, math formulas, and code blocks, and the HTTP server compiles it synchronously before responding:
 - **CPU Spikes**: If 100 users submit large documents simultaneously, the API server’s CPU spikes to 100%, causing incoming requests to queue up and time out.
 - **Lost Data**: If the server crashes or restarts during compilation, the client receives a broken connection error and the work is lost.
 
-By using **RabbitMQ**:
-1. The **API Service** validates the payload, saves a `PENDING` record in PostgreSQL, publishes a message to RabbitMQ, and immediately responds with HTTP `202 Accepted` and a `document_id` in under **15 milliseconds**.
-2. The **Compiler Service** pulls jobs from RabbitMQ at its own controlled pace (using a concurrency limit called `prefetch_count`).
-3. If the Compiler crashes, RabbitMQ detects the severed connection and safely redelivers the message to another worker.
+By using **NATS JetStream**:
+1. The **API Service** validates the payload, saves a `PENDING` record in PostgreSQL, publishes a message to NATS JetStream subject `docs.submitted`, and immediately responds with HTTP `202 Accepted` and a `document_id` in under **15 milliseconds**.
+2. The **Compiler Service** pulls jobs from NATS JetStream at its own controlled pace using a durable consumer with worker concurrency limits.
+3. If the Compiler crashes, NATS JetStream detects the timeout and redelivers the message to another worker.
 
 ### The Database Boundary Rule & Event Feedback
 Notice that **only the API Service connects to PostgreSQL**. The Compiler Service has no database credentials.
 - If multiple services read and write to the same database, you don't have microservices — you have a **distributed monolith**. Any change to a table schema requires deploying both services at the exact same instant.
-- In our system, the Compiler gets what it needs in the RabbitMQ event (`document_id`, `source_content`), uploads the rendered output to MinIO, and publishes a `doc.compiled` event back to RabbitMQ.
-- The API Service listens to `doc.compiled` and updates its own database row to `COMPLETED` with the S3 key and render duration. Clean, decoupled event choreography!
+- In our system, the Compiler gets what it needs in the NATS JetStream event (`document_id`, `source_content`), uploads the rendered output to MinIO, and publishes a `docs.compiled` event back to NATS JetStream.
+- The API Service listens to `docs.compiled` and updates its own database row to `COMPLETED` with the S3 key and render duration. Clean, decoupled event choreography!
 
 ---
 
@@ -104,7 +104,7 @@ new-ms/
 │
 ├── internal/                 # Internal Go packages (not importable by external projects)
 │   ├── api/                  # HTTP routes, handlers, and middleware
-│   ├── broker/               # RabbitMQ publisher and consumer logic
+│   ├── broker/               # NATS JetStream publisher and consumer logic
 │   ├── compiler/             # Goldmark Markdown-to-HTML rendering engine
 │   ├── database/             # PostgreSQL connection pooling (pgxpool)
 │   ├── store/                # SQL queries for documents metadata
@@ -221,14 +221,14 @@ docker --version && k3d --version && kubectl version --client
 
 ### Key Takeaways
 - We chose a clean **2-service architecture**: API Service (`cmd/api`) and Compiler Service (`cmd/compiler`).
-- **Sync for user interaction** (HTTP REST) and **Async for heavy work & state updates** (RabbitMQ event choreography).
+- **Sync for user interaction** (HTTP REST) and **Async for heavy work & state updates** (NATS JetStream event choreography).
 - **Postgres belongs exclusively to the API Service**; the Compiler Service outputs rendered HTML documents into **MinIO S3** and notifies the API via events.
 
 ### Self-Check Questions Before Advancing
 1. Why does the Compiler Service **not** need a direct connection to PostgreSQL?
 2. How does the API Service find out that a document finished compiling if the Compiler cannot touch PostgreSQL?
-3. What is the role of `prefetch_count` in RabbitMQ when processing heavy tasks?
+3. What is the role of durable consumers and ACK policies in NATS JetStream when processing heavy tasks?
 
 ---
 
-In **[Chapter 2: Local Infrastructure with Docker Compose](02-local-infrastructure-docker-compose.md)**, we will write our `deploy/docker/docker-compose.yml` to spin up PostgreSQL, MinIO, and RabbitMQ with persistent storage and healthchecks, and verify them using the Arch Linux terminal.
+In **[Chapter 2: Local Infrastructure with Docker Compose](02-local-infrastructure-docker-compose.md)**, we will write our `deploy/docker/docker-compose.yml` to spin up PostgreSQL, MinIO, and NATS JetStream with persistent storage and healthchecks, and verify them using the Arch Linux terminal.

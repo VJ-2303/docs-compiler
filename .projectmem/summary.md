@@ -9,7 +9,7 @@ A clean, production-grade event-driven microservices system in Go on Arch Linux:
 - No issues logged yet.
 
 ## Decisions
-- No decisions logged yet.
+- Adopt NATS JetStream over RabbitMQ for lighter footprint, pure-Go stack, and simpler subject/stream mental model [internal/broker/publisher.go]
 
 ## Notes
 - No notes logged yet.

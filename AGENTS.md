@@ -32,30 +32,30 @@ Zero forced abstractions. No artificial synchronous RPCs. A pure, choreography-b
                |        (cmd/api, :8080)         |
                +-------+-----------------+-------+
                        |                 |
-     Store Metadata    |                 | Publish "doc.submitted"
+     Store Metadata    |                 | Publish "docs.submitted"
      (PostgreSQL)      v                 v
-            +------------------+   +------------------+
-            |    PostgreSQL    |   |     RabbitMQ     |
-            | (Documents Store)|   |  Exchange: docs  |
-            +------------------+   +--------+---------+
-                       ^                    |
-                       |                    | Consume "doc.submitted"
-        Update Status  |                    v
-       (via API worker)|       +------------------------+
-       consumes event  |       |    Compiler Service    |
-       "doc.compiled"  +-------+      (cmd/compiler)    |
-                               +-----------+------------+
-                                           |
-                               1. Parse Markdown (goldmark)
-                               2. Render styled HTML
-                               3. Upload to MinIO (Bucket: docs-rendered)
-                               4. Publish "doc.compiled" / ACK
-                                           |
-                                           v
-                               +------------------------+
-                               |     MinIO (S3 API)     |
-                               |  Bucket: docs-rendered |
-                               +------------------------+
+            +------------------+   +----------------------+
+            |    PostgreSQL    |   |    NATS JetStream    |
+            | (Documents Store)|   |     Stream: DOCS     |
+            +------------------+   +----------+-----------+
+                       ^                      |
+                       |                      | Consume "docs.submitted"
+        Update Status  |                      v
+       (via API worker)|         +------------------------+
+       consumes event  |         |    Compiler Service    |
+       "docs.compiled" +---------+      (cmd/compiler)    |
+                                 +-----------+------------+
+                                             |
+                                 1. Parse Markdown (goldmark)
+                                 2. Render styled HTML
+                                 3. Upload to MinIO (Bucket: docs-rendered)
+                                 4. Publish "docs.compiled" / ACK
+                                             |
+                                             v
+                                 +------------------------+
+                                 |     MinIO (S3 API)     |
+                                 |  Bucket: docs-rendered |
+                                 +------------------------+
 ```
 
 ### Service Responsibilities & Strict Boundaries
@@ -65,16 +65,16 @@ Zero forced abstractions. No artificial synchronous RPCs. A pure, choreography-b
    - **Public Status Polling**: Handles `GET /v1/documents/{id}` to return document state, compilation metrics, and the direct MinIO download link.
    - **Exclusive Database Owner**: Sole owner of PostgreSQL `documents` table.
    - **Event Publisher & Consumer**:
-     - Publishes `doc.submitted` to RabbitMQ upon user submission.
-     - Subscribes to `doc.compiled` and `doc.failed` from RabbitMQ to update PostgreSQL status (`COMPLETED` or `FAILED`).
+     - Publishes `docs.submitted` to NATS JetStream upon user submission.
+     - Subscribes to `docs.compiled` and `docs.failed` from NATS JetStream to update PostgreSQL status (`COMPLETED` or `FAILED`).
 
 2. **Compiler Service (`cmd/compiler`)**:
    - **Pure Autonomous Background Worker**: No public HTTP port.
    - **Zero Database Access**: Does **not** connect to PostgreSQL (strictly enforcing the Database Boundary Rule).
-   - **Queue Consumer**: Subscribes to `docs.compile` queue in RabbitMQ with strict worker concurrency (`prefetch_count`).
+   - **Queue Consumer**: Subscribes to `docs.submitted` subject in NATS JetStream with durable pull consumers and worker concurrency.
    - **Engine**: Parses Markdown with `goldmark`, bundles CSS, and streams the compiled HTML artifact directly into MinIO S3 (`artifacts/{id}.html`).
-   - **Event Publisher**: Publishes `doc.compiled` (with S3 key and render duration) or `doc.failed` back to RabbitMQ, then acknowledges (`ACK`) the message.
-   - **Resilience**: Rejects corrupt messages to the Dead Letter Queue (`docs.compile.dlq`).
+   - **Event Publisher**: Publishes `docs.compiled` (with S3 key and render duration) or `docs.failed` back to NATS JetStream, then acknowledges (`ACK`) the message.
+   - **Resilience**: Configures retry limits (`MaxDeliver`) and dead-letter routing to `docs.dead`.
 
 ---
 
@@ -85,7 +85,7 @@ Every chapter in `guide/` and all agent responses must strictly adhere to this t
 ### Principle 1: Standard Library First (Zero-Magic)
 - **No frameworks**: No Gin, Fiber, Echo, or GORM.
 - **Why**: Frameworks hide how the web really works. When a framework breaks or leaks memory, beginners have no idea why. Learning Go's `net/http`, `context`, `database/sql`, `os/signal`, and `sync` packages builds lifelong, transferable skills.
-- Use focused, battle-tested drivers: `pgx/v5` (PostgreSQL), `rabbitmq/amqp091-go` (RabbitMQ), `minio-go/v7` (S3).
+- Use focused, battle-tested drivers: `pgx/v5` (PostgreSQL), `nats-io/nats.go` (NATS JetStream), `minio-go/v7` (S3).
 
 ### Principle 2: The "Why" Before the "How"
 - Never introduce a pattern or command without explaining:
@@ -105,8 +105,8 @@ Every chapter in `guide/` and all agent responses must strictly adhere to this t
 
 ### Principle 4: Clean Architecture & Best Practices from Day One
 - **No throwaway code**: Write production-quality code from the start.
-- **Explicit Dependency Injection**: Inject all dependencies (`*store.DocumentStore`, `*slog.Logger`, `*minio.Client`, `*amqp.Channel`) via fields on an `application` struct. Never use global variables.
-- **The Database Boundary Rule**: One database per service. The Compiler Service does **not** connect to PostgreSQL. It receives payload context via AMQP and reports results via events.
+- **Explicit Dependency Injection**: Inject all dependencies (`*store.DocumentStore`, `*slog.Logger`, `*minio.Client`, `jetstream.JetStream`) via fields on an `application` struct. Never use global variables.
+- **The Database Boundary Rule**: One database per service. The Compiler Service does **not** connect to PostgreSQL. It receives payload context via NATS JetStream and reports results via events.
 
 ### Principle 5: Progressive Infrastructure Evolution
 Infrastructure is learned in three distinct phases:
@@ -126,17 +126,17 @@ guide/
 │
 ├── [Phase 1: Architecture & Foundation]
 │   ├── 01-system-design-and-architecture.md          # 2-service topology, boundaries, sync vs async (DONE)
-│   ├── 02-local-infrastructure-docker-compose.md     # Postgres, MinIO, RabbitMQ with healthchecks (DONE)
+│   ├── 02-local-infrastructure-docker-compose.md     # Postgres, MinIO, NATS JetStream with healthchecks (DONE)
 │   ├── 03-database-migrations-and-pooling.md         # golang-migrate, raw SQL migrations, pgxpool (DONE)
 │   └── 04-the-documents-store.md                     # Raw SQL CRUD queries, repository pattern (DONE)
 │
 ├── [Phase 2: The API Service (HTTP & Event Ingestion)]
 │   ├── 05-the-api-server-and-handlers.md             # net/http ServeMux, middleware, slog, validation, POST & GET
-│   └── 06-publishing-events-to-rabbitmq.md           # RabbitMQ connection, channel lifecycle, persistent doc.submitted
+│   └── 06-publishing-events-to-nats-jetstream.md     # NATS connection, JetStream context, stream declaration, persistent docs.submitted
 │
 ├── [Phase 3: The Compiler Worker & MinIO Storage]
 │   ├── 07-minio-storage-and-markdown-engine.md       # S3 client, goldmark CommonMark parsing, HTML styling
-│   └── 08-queue-consumer-and-event-feedback.md       # AMQP consumer loop, QoS prefetch, ACK/NACK, DLQ, doc.compiled feedback
+│   └── 08-queue-consumer-and-event-feedback.md       # JetStream consumer loop, pull consumers, ACK/NAK, docs.compiled feedback
 │
 └── [Phase 4: Containerization & Cloud-Native Kubernetes]
     ├── 09-multi-stage-dockerfiles.md                 # Scratch multi-stage builds, composing API + Compiler + Infra
@@ -149,19 +149,19 @@ guide/
 1. **Chapter 1: System Design and Microservice Architecture** *(Complete)*
    - *Deliverable*: 2-service topology, sync vs async analysis, monorepo layout, toolchain verification.
 2. **Chapter 2: Local Infrastructure with Docker Compose** *(Complete)*
-   - *Deliverable*: `deploy/docker/docker-compose.yml` (Postgres, MinIO, RabbitMQ), persistent named volumes, healthchecks, `Makefile`.
+   - *Deliverable*: `deploy/docker/docker-compose.yml` (Postgres, MinIO, NATS JetStream), persistent named volumes, healthchecks, `Makefile`.
 3. **Chapter 3: Database Migrations and Connection Pooling** *(Complete)*
    - *Deliverable*: `migrations/000001_create_documents.up.sql`, `internal/database/db.go` (pgxpool configuration).
 4. **Chapter 4: The Documents Store** *(Complete)*
    - *Deliverable*: `internal/store/documents.go` (Insert, GetByID, UpdateStatus with context timeouts, domain models).
 5. **Chapter 5: The API Server and Handlers**
    - *Deliverable*: `cmd/api/main.go`, `internal/api/routes.go`, `internal/api/handlers.go` (`POST /v1/documents`, `GET /v1/documents/{id}`), logging & panic-recovery middleware.
-6. **Chapter 6: Publishing Events to RabbitMQ**
-   - *Deliverable*: `internal/broker/publisher.go` (AMQP channel, exchange declaration, persistent `doc.submitted` publishing).
+6. **Chapter 6: Publishing Events to NATS JetStream**
+   - *Deliverable*: `internal/broker/publisher.go` (NATS connection, JetStream context, stream declaration, persistent `docs.submitted` publishing).
 7. **Chapter 7: MinIO Storage and Markdown Engine**
    - *Deliverable*: `internal/storage/s3.go` (bucket ensure, PutObject), `internal/compiler/engine.go` (`goldmark` HTML compilation, sanitization, embedded styling).
 8. **Chapter 8: Queue Consumer & Event Feedback Loop**
-   - *Deliverable*: `cmd/compiler/main.go`, `internal/broker/consumer.go` (worker pool, QoS prefetch, ACK/NACK, DLQ routing, publishing `doc.compiled`), and API service consumer updating PostgreSQL.
+   - *Deliverable*: `cmd/compiler/main.go`, `internal/broker/consumer.go` (worker pool, JetStream consumer, ACK/NAK, dead-letter routing, publishing `docs.compiled`), and API service consumer updating PostgreSQL.
 9. **Chapter 9: Multi-Stage Dockerfiles & Full Compose Stack**
    - *Deliverable*: `deploy/docker/Dockerfile.api`, `deploy/docker/Dockerfile.compiler` (scratch builds), full local stack orchestration.
 10. **Chapter 10: Kubernetes on Arch Linux with k3d**
