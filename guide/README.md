@@ -216,10 +216,10 @@ guide/
 │
 ├── [Phase 2: The API Service (HTTP & Event Ingestion)]
 │   ├── 05-the-api-server-and-handlers.md             # net/http ServeMux, middleware, slog, validation, POST & GET (DONE)
-│   └── 06-publishing-events-to-nats-jetstream.md     # NATS connection, JetStream context, stream declaration, persistent docs.submitted
+│   └── 06-publishing-events-to-nats-jetstream.md     # NATS connection, JetStream context, stream declaration, persistent docs.submitted (DONE)
 │
 ├── [Phase 3: The Compiler Worker & MinIO Storage]
-│   ├── 07-minio-storage-and-markdown-engine.md       # S3 client, goldmark CommonMark parsing, HTML styling
+│   ├── 07-minio-storage-and-markdown-engine.md       # S3 client, goldmark CommonMark parsing, HTML styling (DONE)
 │   └── 08-queue-consumer-and-event-feedback.md       # JetStream consumer loop, pull consumers, ACK/NAK, docs.compiled feedback
 │
 └── [Phase 4: Containerization & Cloud-Native Kubernetes]
