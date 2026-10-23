@@ -1,5 +1,7 @@
 .PHONY: help up down logs ps clean
 
+DB_DSN ?= "postgres://docpub:docpub_secret@localhost:5432/docpub?sslmode=disable"
+
 help:
 	@echo "Available commands:"
 	@echo "  make up     - Start all infrastructure containers in background"
@@ -22,3 +24,13 @@ ps:
 
 clean:
 	docker compose -f deploy/docker/docker-compose.yml down -v
+
+migrate-up:
+	migrate -path migrations -database $(DB_DSN) up
+
+migrate-down:
+	migrate -path migrations -database $(DB_DSN) down 1
+
+migrate-force:
+	@read -p "Enter version to force: " version; \
+	migrate -path migrations -database $(DB_DSN) force $$version
