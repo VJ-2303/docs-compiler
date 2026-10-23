@@ -2,7 +2,8 @@ package broker
 
 import (
 	"time"
-	"uuid"
+
+	"github.com/google/uuid"
 )
 
 type DocumentSubmittedEvent struct {

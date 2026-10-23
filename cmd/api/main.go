@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vj/docx/internal/api"
+	"github.com/vj/docx/internal/broker"
 	"github.com/vj/docx/internal/database"
 	"github.com/vj/docx/internal/store"
 )
@@ -21,6 +22,7 @@ func main() {
 	flag.IntVar(&cfg.Port, "port", 8080, "API server port")
 	flag.StringVar(&cfg.Env, "env", "development", "Environment (development|staging|production)")
 	flag.StringVar(&dsn, "db-dsn", "postgres://docpub:docpub_secret@localhost:5432/docpub?sslmode=disable", "PostgreSQL DSN")
+	flag.StringVar(&cfg.NatsURL, "nats-url", "nats://localhost:4222", "NATS JetStream broker URL")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -45,8 +47,15 @@ func main() {
 
 	logger.Info("database connection pool established")
 
+	publisher, err := broker.NewPublisher(cfg.NatsURL, logger)
+	if err != nil {
+		logger.Error("failed to connect to nats jetstream", "error", err)
+		os.Exit(1)
+	}
+	defer publisher.Close()
+
 	docStore := store.NewDocumentStore(dbpool)
-	app := api.New(cfg, docStore, logger)
+	app := api.New(cfg, docStore, logger, publisher)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

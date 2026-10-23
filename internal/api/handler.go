@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/vj/docx/internal/broker"
 	"github.com/vj/docx/internal/store"
 	"github.com/vj/docx/internal/validator"
 )
@@ -51,6 +52,19 @@ func (app *Application) createDocumentHandler(w http.ResponseWriter, r *http.Req
 	err = app.Store.Insert(r.Context(), doc)
 	if err != nil {
 		app.serverErrorResponse(w, r, err)
+		return
+	}
+
+	event := broker.DocumentSubmittedEvent{
+		DocumentID:    doc.ID,
+		SourceContent: doc.SourceContent,
+		SubmittedAt:   doc.CreatedAt,
+	}
+	err = app.Publisher.PublishDocumentSubmitted(r.Context(), event)
+	if err != nil {
+		_ = app.Store.UpdateStatus(r.Context(), doc.ID, store.StatusFailed, nil, 0)
+
+		app.serverErrorResponse(w, r, errors.New("failed to enqueue document for processing"))
 		return
 	}
 
