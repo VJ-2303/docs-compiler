@@ -55,6 +55,21 @@ func main() {
 	defer publisher.Close()
 
 	docStore := store.NewDocumentStore(dbpool)
+
+	resultsConsumer, err := broker.NewResultsConsumer(ctx, cfg.NatsURL, docStore, logger)
+	if err != nil {
+		logger.Error("failed to initialize results consumer", "error", err)
+		os.Exit(1)
+	}
+	defer resultsConsumer.Close()
+
+	resultsCtx, err := resultsConsumer.Start(context.Background())
+	if err != nil {
+		logger.Error("failed to start results consumer", "error", err)
+		os.Exit(1)
+	}
+	defer resultsCtx.Stop()
+
 	app := api.New(cfg, docStore, logger, publisher)
 
 	srv := &http.Server{

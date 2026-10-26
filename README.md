@@ -66,8 +66,8 @@ The complete step-by-step 11-chapter curriculum lives in [`guide/`](guide/README
 5. [Chapter 5: The API Server and Handlers](guide/05-the-api-server-and-handlers.md) *(Completed)*
 6. [Chapter 6: Publishing Events to NATS JetStream](guide/06-publishing-events-to-nats-jetstream.md) *(Completed)*
 7. [Chapter 7: MinIO Storage and Markdown Engine](guide/07-minio-storage-and-markdown-engine.md) *(Completed)*
-8. [Chapter 8: Queue Consumer and Event Feedback Loop](guide/08-queue-consumer-and-event-feedback.md) *(Next)*
-9. [Chapter 9: Multi-Stage Dockerfiles](guide/09-multi-stage-dockerfiles.md)
+8. [Chapter 8: Queue Consumer and Event Feedback Loop](guide/08-queue-consumer-and-event-feedback.md) *(Completed)*
+9. [Chapter 9: Multi-Stage Dockerfiles](guide/09-multi-stage-dockerfiles.md) *(Next)*
 10. [Chapter 10: Kubernetes on Arch Linux with k3d](guide/10-kubernetes-on-arch-with-k3d.md)
 11. [Chapter 11: Resilience, Graceful Shutdown, and Production Probes](guide/11-resilience-graceful-shutdown-and-probes.md)
 

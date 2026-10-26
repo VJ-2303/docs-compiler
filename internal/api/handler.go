@@ -57,6 +57,7 @@ func (app *Application) createDocumentHandler(w http.ResponseWriter, r *http.Req
 
 	event := broker.DocumentSubmittedEvent{
 		DocumentID:    doc.ID,
+		Title:         doc.Title,
 		SourceContent: doc.SourceContent,
 		SubmittedAt:   doc.CreatedAt,
 	}

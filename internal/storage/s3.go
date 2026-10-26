@@ -15,7 +15,7 @@ type Config struct {
 	AccessKey string
 	SecretKey string
 	Bucket    string
-	useSSL    bool
+	UseSSL    bool
 }
 
 type Client struct {
@@ -27,7 +27,7 @@ type Client struct {
 func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Client, error) {
 	mc, err := minio.New(cfg.Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-		Secure: cfg.useSSL,
+		Secure: cfg.UseSSL,
 	})
 
 	if err != nil {
